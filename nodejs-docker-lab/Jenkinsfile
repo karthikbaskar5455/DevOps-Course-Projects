@@ -1,0 +1,99 @@
+pipeline {
+    agent any
+
+    environment {
+        DOCKER_IMAGE = 'akashpgm/nodejs-bluegreen'
+        DOCKER_CREDENTIALS = 'dockerhub-credentials'
+        NETWORK = 'bluegreen-network'
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                bat '''
+                    cd nodejs-docker-lab
+                    docker build -t %DOCKER_IMAGE%:latest .
+                '''
+            }
+        }
+
+        stage('Login to Docker Hub') {
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'dockerhub-credentials',
+                        usernameVariable: 'DOCKER_USER',
+                        passwordVariable: 'DOCKER_PASS'
+                    )
+                ]) {
+                    bat '''
+                        echo %DOCKER_PASS%| docker login -u %DOCKER_USER% --password-stdin
+                    '''
+                }
+            }
+        }
+
+        stage('Push Docker Image') {
+            steps {
+                bat '''
+                    docker push %DOCKER_IMAGE%:latest
+                '''
+            }
+        }
+
+        stage('Deploy Green') {
+            steps {
+                bat '''
+                    docker rm -f nodejs-green 2>NUL
+                    docker pull %DOCKER_IMAGE%:latest
+                    docker run -d --name nodejs-green --network %NETWORK% %DOCKER_IMAGE%:latest
+                '''
+            }
+        }
+
+        stage('Test Green') {
+            steps {
+                bat '''
+                    powershell -Command "Start-Sleep -Seconds 5"
+                    powershell -Command "$response = Invoke-RestMethod http://localhost:3000/status; if ($response.status -eq $null) { exit 1 }"
+                '''
+            }
+        }
+
+        stage('Switch to Green') {
+            steps {
+                bat '''
+                    powershell -Command "(Get-Content nodejs-docker-lab/nginx/nginx.conf) -replace 'nodejs-blue:3000', 'nodejs-green:3000' | Set-Content nodejs-docker-lab/nginx/nginx.conf"
+                    docker cp nodejs-docker-lab/nginx/nginx.conf bluegreen-proxy:/etc/nginx/nginx.conf
+                    docker exec bluegreen-proxy nginx -s reload
+                '''
+            }
+        }
+
+        stage('Cleanup Blue') {
+            steps {
+                bat '''
+                    docker rm -f nodejs-blue 2>NUL
+                    docker rename nodejs-green nodejs-blue
+                '''
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'Blue-Green deployment completed successfully.'
+        }
+
+        failure {
+            echo 'Blue-Green deployment failed.'
+        }
+    }
+}
